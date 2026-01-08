@@ -1,0 +1,17 @@
+# --- Core web app ---
+Flask
+Werkzeug
+
+# --- Model inference ---
+ultralytics
+opencv-python
+numpy
+Pillow
+pyshp
+Fiona
+Shapely
+# --- Shapefile export (pyshp) ---
+shapefile
+
+# --- (Optional) production server ---
+gunicorn
