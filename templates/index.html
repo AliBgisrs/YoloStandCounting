@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>YOLO Stand Count (ROI)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+
+  <!-- Bootstrap -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"/>
+
+  <!-- Leaflet + Draw -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+
+  <style>
+    body { background: #f8f9fa; }
+    #map { width: 100%; height: 600px; border: 1px solid #dee2e6; border-radius: 8px; }
+    #resultImage { display:block; width:100%; max-width:1200px; height:auto; border:1px solid #dee2e6; border-radius:6px; }
+    .counts-table td, .counts-table th { padding: 4px 8px; }
+    .status { min-height: 1.25rem; }
+    .swatch { width: 16px; height: 12px; border: 1px solid #888; display: inline-block; border-radius: 2px; vertical-align: -2px; }
+    .swatch-yellow { background: #ffff00; }
+    .swatch-navy   { background: #000080; }
+    .swatch-white  { background: #ffffff; }
+    .swatch-green  { background: #00ff00; }
+  </style>
+</head>
+<body>
+<div class="container py-4">
+  <h3 class="mb-3">YOLO Stand Count (Select ROI)</h3>
+
+  <!-- Upload -->
+  <div class="row g-2 align-items-center mb-2">
+    <div class="col-md-6">
+      <input id="imageFile" type="file" class="form-control" accept="image/*"/>
+    </div>
+    <div class="col-md-3">
+      <button id="btnUpload" class="btn btn-primary w-100">Upload Image</button>
+    </div>
+    <div class="col-md-3">
+      <div id="uploadStatus" class="status text-muted small"></div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="row g-2 align-items-center mb-3" style="max-width:700px">
+    <div class="col-auto"><label for="confInput" class="col-form-label">Confidence ≥</label></div>
+    <div class="col">
+      <input type="range" class="form-range" min="1" max="99" value="20" id="confInput"
+             oninput="confLabel.innerText = confInput.value + '%';">
+    </div>
+    <div class="col-auto"><span id="confLabel">20%</span></div>
+    <div class="col-auto">
+      <button id="btnAnalyze" class="btn btn-success" disabled>Analyze Selected ROI</button>
+    </div>
+    <div class="col-12">
+      <div id="analyzeStatus" class="status text-muted small"></div>
+    </div>
+  </div>
+
+  <!-- Map -->
+  <div id="map" class="mb-3"></div>
+
+  <!-- Results -->
+  <div id="results" class="mt-3">
+    <h5>Results</h5>
+    <div id="countsPanel" class="mb-2"></div>
+
+    <img id="resultImage" src="" alt="Annotated ROI will appear here"/>
+    <div id="fullSizeLink" class="mt-2"></div>
+    <div id="geojsonLink" class="mt-1"></div>
+
+    <details id="debugBlock" style="display:none;">
+      <summary>Debug info</summary>
+      <pre id="debugText" class="small"></pre>
+    </details>
+  </div>
+</div>
+
+<script>
+let imagePath = null, imgWidth = 0, imgHeight = 0;
+let map = null, drawnItems = null;
+const pixelCRS = L.CRS.Simple;
+
+const imageFile     = document.getElementById('imageFile');
+const btnUpload     = document.getElementById('btnUpload');
+const btnAnalyze    = document.getElementById('btnAnalyze');
+const uploadStatus  = document.getElementById('uploadStatus');
+const analyzeStatus = document.getElementById('analyzeStatus');
+const countsPanel   = document.getElementById('countsPanel');
+const resultImage   = document.getElementById('resultImage');
+const fullSizeLink  = document.getElementById('fullSizeLink');
+const geojsonLink   = document.getElementById('geojsonLink');
+const debugBlock    = document.getElementById('debugBlock');
+const debugText     = document.getElementById('debugText');
+const confInput     = document.getElementById('confInput');
+const confLabel     = document.getElementById('confLabel');
+
+btnUpload.addEventListener('click', async () => {
+  const f = imageFile.files[0];
+  uploadStatus.textContent = '';
+  if (!f) { alert('Please choose an image first.'); return; }
+  const formData = new FormData(); formData.append('image', f);
+  try {
+    uploadStatus.textContent = 'Uploading...';
+    const r = await fetch('/upload', { method: 'POST', body: formData });
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    imagePath = data.image_path; imgWidth = data.width; imgHeight = data.height;
+    setupMapWithImage(imgWidth, imgHeight, imagePath);
+    btnAnalyze.disabled = false;
+    uploadStatus.textContent = 'Upload complete.';
+  } catch (e) {
+    uploadStatus.textContent = 'Upload failed.'; alert(e.message || 'Upload failed.');
+  }
+});
+
+function setupMapWithImage(w, h, url) {
+  if (map) map.remove();
+  map = L.map('map', { crs: pixelCRS, minZoom: -4, maxZoom: 4, zoomControl: true });
+  const bounds = [[0,0],[h,w]];
+  L.imageOverlay(url, bounds).addTo(map);
+  map.fitBounds(bounds);
+
+  drawnItems = new L.FeatureGroup(); map.addLayer(drawnItems);
+  const drawControl = new L.Control.Draw({
+    draw: { polygon:false, polyline:false, circle:false, marker:false, circlemarker:false,
+      rectangle:{ shapeOptions:{ color:'#3388ff', weight:2, fillOpacity:0.3 } } },
+    edit: { featureGroup: drawnItems, edit:true, remove:true }
+  });
+  map.addControl(drawControl);
+  map.on(L.Draw.Event.CREATED, e => { drawnItems.clearLayers(); drawnItems.addLayer(e.layer); });
+}
+
+btnAnalyze.addEventListener('click', async () => {
+  analyzeStatus.textContent = '';
+  if (!imagePath || !drawnItems || drawnItems.getLayers().length === 0) {
+    alert('Please draw a rectangle ROI on the image.'); return;
+  }
+  const rect = drawnItems.getLayers()[0];
+  const b = rect.getBounds();
+  const roi = { _southWest: { lat: b.getSouth(), lng: b.getWest() },
+                _northEast: { lat: b.getNorth(), lng: b.getEast() } };
+  const confFromUI = (Number(confInput.value) || 20) / 100.0;
+
+  const payload = { image_path: imagePath, width: imgWidth, height: imgHeight,
+                    roi: roi, conf_min: confFromUI };
+
+  try {
+    analyzeStatus.textContent = 'Analyzing ROI...';
+    const r = await fetch('/analyze', { method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload) });
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    renderResults(data);
+    const confPct = Math.round((data.conf_threshold || 0) * 100);
+    confInput.value = confPct; confLabel.innerText = confPct + '%';
+    analyzeStatus.textContent = 'Done.';
+  } catch (e) {
+    analyzeStatus.textContent = 'Analysis failed.'; alert(e.message || 'Analysis failed.');
+  }
+});
+
+function renderResults(data) {
+  const classIds = (data.class_ids || []).map(Number);
+  const counts = data.class_box_counts || {};
+  const perBoxMap = data.plants_per_class || {};
+  const perClassPlants = data.per_class_plants || {};
+  const names = data.class_names || {};
+  const confPct = Math.round((data.conf_threshold || 0) * 100);
+
+  // Match backend colors (0: yellow, 1: navy, 2: white, 3: green)
+  const colorCSS = { 0:'swatch-yellow', 1:'swatch-navy', 2:'swatch-white', 3:'swatch-green' };
+
+  const rows = classIds.map(c => {
+    const boxes  = Number(counts[String(c)] || 0);
+    const perBox = Number(perBoxMap[c] || 0);
+    const plants = Number(perClassPlants[String(c)] || boxes * perBox);
+    const label  = (names[c] !== undefined) ? names[c] : `Class ${c}`;
+    const sw     = colorCSS.hasOwnProperty(c) ? colorCSS[c] : 'swatch-green';
+    const swatch = `<span class="swatch ${sw}"></span>`;
+    return `<tr>
+      <td>${c}</td><td>${swatch}</td><td>${label}</td><td>${boxes}</td><td>${perBox}</td><td>${plants}</td>
+    </tr>`;
+  }).join('');
+
+  countsPanel.innerHTML = `
+    <table class="table table-sm table-bordered counts-table" style="max-width:760px;">
+      <thead class="table-light">
+        <tr><th>ID</th><th>Color</th><th>Label</th><th>Boxes</th><th>Plants/Box</th><th>Plants</th></tr>
+      </thead>
+      <tbody>
+        ${rows}
+        <tr class="table-secondary fw-bold">
+          <td colspan="5">Total plants (≥ ${confPct}% conf)</td>
+          <td>${Number(data.total_plants || 0)}</td>
+        </tr>
+      </tbody>
+    </table>
+  `;
+
+  // Annotated ROI preview
+  resultImage.src = data.result_image || '';
+  resultImage.alt = "Annotated ROI";
+
+  // Full-size preview link
+  fullSizeLink.innerHTML = data.result_image
+    ? `<a href="${data.result_image}" target="_blank" class="link-primary">Open full size in new tab</a>`
+    : '';
+
+  // Download links: prefer UTM exports
+  let links = '';
+  if (data.utm_geojson_path) {
+    links += `<a href="${data.utm_geojson_path}" download class="link-success">Polygons — GeoJSON (UTM ${data.utm_epsg})</a>`;
+  }
+  if (data.utm_centroids_csv) {
+    links += `<br><a href="${data.utm_centroids_csv}" download class="link-secondary">Centroids CSV (UTM ${data.utm_epsg})</a>`;
+  }
+  if (data.utm_shapefile_path) {
+    links += `<br><a href="${data.utm_shapefile_path}" download class="link-secondary">Shapefile (UTM ${data.utm_epsg})</a>`;
+  }
+
+  // Also expose original map/pixel outputs for debugging
+  if (data.geojson_path) {
+    links += `<br><a href="${data.geojson_path}" download class="link-secondary">Polygons — original CRS (debug)</a>`;
+  }
+  if (data.crs_wkt_path) {
+    links += `<br><a href="${data.crs_wkt_path}" download class="link-secondary">CRS WKT (original)</a>`;
+  }
+  if (data.centroids_csv) {
+    links += `<br><a href="${data.centroids_csv}" download class="link-secondary">Centroids CSV (original)</a>`;
+  }
+
+  if (links) {
+    links += `<div class="small text-muted mt-1">
+      Export CRS: ${
+        data.utm_epsg ? ('UTM EPSG: ' + data.utm_epsg)
+        : (data.georef_used ? (data.epsg ? ('EPSG: ' + data.epsg) : 'WKT (no EPSG)') : 'image pixels (no georef found)')
+      }
+    </div>`;
+  }
+  geojsonLink.innerHTML = links;
+
+  // Debug panel
+  debugText.textContent = JSON.stringify({
+    used_tiling: data.used_tiling,
+    tile_size: data.tile_size,
+    tile_overlap: data.tile_overlap,
+    iou_nms: data.iou_nms,
+    core_margin: data.core_margin,
+    georef_used: data.georef_used,
+    epsg: data.epsg,
+    has_crs_wkt: data.has_crs_wkt,
+    georef_source: data.georef_source,
+    utm_epsg: data.utm_epsg
+  }, null, 2);
+  debugBlock.style.display = 'block';
+}
+</script>
+</body>
+</html>
